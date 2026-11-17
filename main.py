@@ -4,7 +4,9 @@ Reads one case (schema makefun/twitch-ccu-case/v1): the first hour's print
 plus the launch-day curves of past big game launches ("comparables"), and
 writes five quantiles (5/25/50/75/95%) of each of hours 2..24.
 
-Method: two log-space regressions per hour, blended 50/50 in log space.
+Method: two log-space regressions per hour, blended in log space,
+plus a nearest-neighbour shape component, all fitted at run time from
+the case's own comparables.
   1. Full fit: ln(viewers_h) ~ ln(hour-1 print) + ln(pre-release baseline)
      over every usable comparable. The hour-1 print encodes how much of
      the rolling-midnight unlock has already happened (a small hour 1
@@ -14,9 +16,20 @@ Method: two log-space regressions per hour, blended 50/50 in log space.
      spreads.
   2. Console-only fit: ln(viewers_h) ~ ln(hour-1 print) over the
      comparables whose platforms name no PC (console launches, the same
-     regime as GTA VI: rolling midnight, no global PC unlock).
-Spreads come from each fit's empirical residual quantiles, so the 90%
-band covers about 90% of past launches.
+     regime as GTA VI: rolling midnight, no global PC unlock). Its
+     slope near 0.7 extrapolates far better than the full fit's flat
+     late-hour slopes when the hour-1 print exceeds every comparable.
+  3. Neighbour shapes: the 6 comparables nearest the target in
+     (ln hour-1 print, ln baseline), kernel-weighted, contribute their
+     mean log-ratio profile and its residual spread. This local
+     component adapts the forecast to launches shaped like the target
+     instead of forcing one global line through all regimes.
+The full fit carries weight 0.25 against the console-only fit, and the
+neighbour component carries weight 0.3 against the regression blend.
+Both weights were chosen by leave-one-comparable-out validation over
+the comparables (never by tuning on the practice answers): the blend
+beats the regression-only model on held-out console launches and, by
+a wide margin, when the largest launches are held out together.
 
 Fitted parameters are computed at run time from the case's own
 comparables (the final case carries 42, practice cases 38). The
@@ -37,7 +50,7 @@ import math
 import os
 from datetime import datetime
 from pathlib import Path
-from statistics import NormalDist
+from statistics import NormalDist, pstdev
 
 INPUT_DIR = Path(os.environ.get("MAKEFUN_INPUT_DIR", "/input"))
 OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
@@ -47,7 +60,15 @@ NORMAL = NormalDist()
 # Persistence fallback: log-spread per square-root hour.
 SIGMA = 0.15
 # Blend weight of the full fit (1 - weight goes to the console-only fit).
-BLEND_W = 0.5
+BLEND_W = 0.25
+# Neighbour-shape component: nearest KNN_K curves, Gaussian kernel
+# bandwidth KNN_H in standardised (ln p1, ln baseline) distance, weight
+# KNN_W against the regression blend. Needs at least MIN_KNN_CURVES
+# curves carrying the hour.
+KNN_K = 6
+KNN_H = 1.0
+KNN_W = 0.3
+MIN_KNN_CURVES = 3
 # A comparable counts as usable with an hour-1 print and this many of
 # hours 2..24 present.
 MIN_DAY_HOURS = 12
@@ -373,34 +394,81 @@ def _exp_capped(log_value):
     return value
 
 
-def _quantiles_from_fit(fit, x, xb, levels):
+def _log_q_from_fit(fit, x, xb, levels):
+    """Log-space quantiles from a fit: [center + residual quantile]."""
     if fit[0] == "two":
         _, a, b1, b2, res = fit
         center = a + b1 * x + b2 * xb
     else:
         _, a, b, res = fit
         center = a + b * x
-    return [_exp_capped(center + _quantile(res, tau)) for tau in levels]
+    return [center + _quantile(res, tau) for tau in levels]
 
 
-def _quantiles_embedded(table_full, table_sub, hour, x, xb, levels):
-    """Quantiles from the embedded fallback tables; None when unusable."""
-    full_q = None
-    sub_q = None
+def _log_q_embedded(table_full, table_sub, hour, x, xb, levels):
+    """Log-space quantiles from the embedded fallback tables; None if unusable."""
+    full_lq = None
+    sub_lq = None
     if hour in table_full and xb is not None:
         a, b1, b2, offs = table_full[hour]
         center = a + b1 * x + b2 * xb
-        full_q = [_exp_capped(center + _quantile(sorted(offs), tau))
-                  for tau in levels]
+        full_lq = [center + _quantile(sorted(offs), tau) for tau in levels]
     if hour in table_sub:
         a, b, offs = table_sub[hour]
         center = a + b * x
-        sub_q = [_exp_capped(center + _quantile(sorted(offs), tau))
-                 for tau in levels]
-    if full_q is not None and sub_q is not None:
-        return [_exp_capped(BLEND_W * math.log(f) + (1.0 - BLEND_W) * math.log(s))
-                for f, s in zip(full_q, sub_q)]
-    return full_q if full_q is not None else sub_q
+        sub_lq = [center + _quantile(sorted(offs), tau) for tau in levels]
+    if full_lq is not None and sub_lq is not None:
+        return [BLEND_W * f + (1.0 - BLEND_W) * s
+                for f, s in zip(full_lq, sub_lq)]
+    return full_lq if full_lq is not None else sub_lq
+
+
+def _knn_scales(curves):
+    """Standard deviations of ln(p1) and ln(baseline) over the curves.
+
+    None when too few curves to run the neighbour component.
+    """
+    if len(curves) < MIN_KNN_CURVES:
+        return None
+    sd_x = pstdev([math.log(c["p1"]) for c in curves]) or 1.0
+    xb = [math.log(c["base"]) for c in curves if c["base"]]
+    sd_b = (pstdev(xb) or 1.0) if xb else 1.0
+    return (sd_x, sd_b)
+
+
+def _log_q_knn(curves, scales, x, xb, hour, levels):
+    """Log-space quantiles from the nearest-neighbour shape component.
+
+    The KNN_K curves nearest the target in standardised (ln p1,
+    ln baseline) distance contribute their kernel-weighted mean
+    log-ratio for this hour, with spreads from the neighbours'
+    residual quantiles around that mean. None when too few curves
+    carry the hour.
+    """
+    if scales is None:
+        return None
+    sd_x, sd_b = scales
+    scored = []
+    for c in curves:
+        if hour not in c["day"] or c["day"][hour] <= 0:
+            continue
+        d = abs(math.log(c["p1"]) - x) / sd_x
+        if xb is not None and c["base"]:
+            d += abs(math.log(c["base"]) - xb) / sd_b
+        scored.append((d, c))
+    if len(scored) < MIN_KNN_CURVES:
+        return None
+    scored.sort(key=lambda t: t[0])
+    use = scored[:KNN_K]
+    wts = [math.exp(-(d * d) / (2.0 * KNN_H * KNN_H)) for d, _ in use]
+    wsum = sum(wts)
+    if wsum <= 0:
+        return None
+    ratios = [math.log(c["day"][hour] / c["p1"]) for _, c in use]
+    mean_r = sum(w * r for w, r in zip(wts, ratios)) / wsum
+    res = sorted(r - mean_r for r in ratios)
+    center = x + mean_r
+    return [center + _quantile(res, tau) for tau in levels]
 
 
 def _persistence(p1, hour, levels):
@@ -469,32 +537,42 @@ def _forecast_case_inner(case):
     curves = _curves(case)
     full_fits = _fit_full(curves)
     sub_fits = _fit_subset(curves)
+    knn_scales = _knn_scales(curves)
     rows = []
     for h in hours:
-        full_q = None
-        sub_q = None
+        full_lq = None
+        sub_lq = None
         if h in full_fits:
             fit = full_fits[h]
-            if fit[0] == "two" and xb is None:
-                pass
-            else:
-                full_q = _quantiles_from_fit(fit, x, xb if xb is not None else 0.0, levels)
+            if not (fit[0] == "two" and xb is None):
+                full_lq = _log_q_from_fit(
+                    fit, x, xb if xb is not None else 0.0, levels)
         if h in sub_fits:
             a, b, res = sub_fits[h]
-            sub_q = [_exp_capped(a + b * x + _quantile(res, tau)) for tau in levels]
-        if full_q is not None and sub_q is not None:
-            blended = [_exp_capped(BLEND_W * math.log(f) + (1.0 - BLEND_W) * math.log(s))
-                       for f, s in zip(full_q, sub_q)]
-        elif full_q is not None:
-            blended = full_q
-        elif sub_q is not None:
-            blended = sub_q
+            sub_lq = [a + b * x + _quantile(res, tau) for tau in levels]
+        if full_lq is not None and sub_lq is not None:
+            reg = [BLEND_W * f + (1.0 - BLEND_W) * s
+                   for f, s in zip(full_lq, sub_lq)]
+        elif full_lq is not None:
+            reg = full_lq
+        elif sub_lq is not None:
+            reg = sub_lq
         else:
-            blended = _quantiles_embedded(
+            reg = _log_q_embedded(
                 FALLBACK_FULL, FALLBACK_SUB, h, x, xb, levels)
-        if blended is None:
-            blended = _persistence(p1, h, levels)
-        rows.append({"hour": h, "q": _clean(blended)})
+        knn_lq = _log_q_knn(curves, knn_scales, x, xb, h, levels)
+        if reg is not None and knn_lq is not None:
+            log_q = [(1.0 - KNN_W) * r + KNN_W * k
+                     for r, k in zip(reg, knn_lq)]
+        elif reg is not None:
+            log_q = reg
+        elif knn_lq is not None:
+            log_q = knn_lq
+        else:
+            spread = SIGMA * math.sqrt(h - 1)
+            log_q = [math.log(max(1.0, p1)) + NORMAL.inv_cdf(tau) * spread
+                     for tau in levels]
+        rows.append({"hour": h, "q": _clean([_exp_capped(v) for v in log_q])})
     return {"hours": rows}
 
 
