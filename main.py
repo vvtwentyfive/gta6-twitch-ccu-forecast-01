@@ -19,6 +19,9 @@ the case's own comparables.
      regime as GTA VI: rolling midnight, no global PC unlock). Its
      slope near 0.7 extrapolates far better than the full fit's flat
      late-hour slopes when the hour-1 print exceeds every comparable.
+     Each hour's slope is shrunk 30% toward the pooled slope over all
+     hours (SHRINK_SUB), which regularises the small 8-curve console
+     fit and improves held-out large launches.
   3. Neighbour shapes: the 6 comparables nearest the target in
      (ln hour-1 print, ln baseline), kernel-weighted, contribute their
      mean log-ratio profile and its residual spread. This local
@@ -26,7 +29,12 @@ the case's own comparables.
      instead of forcing one global line through all regimes.
 The full fit carries weight 0.25 against the console-only fit, and the
 neighbour component carries weight 0.3 against the regression blend.
-Both weights were chosen by leave-one-comparable-out validation over
+The final log-quantile offsets from the median are scaled by 0.9
+(SPREAD_SCALE): in-sample residual quantiles from the small console
+fit overstate the spread, and the calibrated multiplier brings the
+leave-one-comparable-out 90% coverage toward its nominal level.
+All four constants (blend weight, neighbour weight, shrinkage,
+spread scale) were chosen by leave-one-comparable-out validation over
 the comparables (never by tuning on the practice answers): the blend
 beats the regression-only model on held-out console launches and, by
 a wide margin, when the largest launches are held out together.
@@ -61,6 +69,11 @@ NORMAL = NormalDist()
 SIGMA = 0.15
 # Blend weight of the full fit (1 - weight goes to the console-only fit).
 BLEND_W = 0.25
+# Console-fit slope shrinkage toward the pooled all-hours slope, and
+# the final spread-scale multiplier on log-quantile offsets from the
+# median. Both calibrated by leave-one-comparable-out validation.
+SHRINK_SUB = 0.3
+SPREAD_SCALE = 0.9
 # Neighbour-shape component: nearest KNN_K curves, Gaussian kernel
 # bandwidth KNN_H in standardised (ln p1, ln baseline) distance, weight
 # KNN_W against the regression blend. Needs at least MIN_KNN_CURVES
@@ -106,29 +119,29 @@ FALLBACK_FULL = {
     24: (11.0515, 0.1484, -0.0932, [-0.9931, -0.5798, 0.068, 0.5969, 1.0764]),
 }
 FALLBACK_SUB = {
-    2: (-0.0422, 0.9854, [-0.1403, -0.0596, -0.0098, 0.0312, 0.1812]),
-    3: (-0.6472, 1.0132, [-0.5227, -0.1666, 0.118, 0.1869, 0.3502]),
-    4: (0.2169, 0.9317, [-0.3162, -0.1406, -0.0052, 0.1706, 0.2934]),
-    5: (-0.8390, 1.0595, [-0.2321, -0.0703, 0.0122, 0.098, 0.1932]),
-    6: (-0.2096, 1.0114, [-0.2798, -0.1534, 0.0461, 0.1553, 0.2159]),
-    7: (0.7547, 0.9204, [-0.3477, -0.1654, 0.0891, 0.1348, 0.2659]),
-    8: (1.2850, 0.8697, [-0.3982, -0.138, 0.0903, 0.1563, 0.267]),
-    9: (1.7783, 0.8248, [-0.2664, -0.2196, -0.0156, 0.1937, 0.3036]),
-    10: (1.5403, 0.8456, [-0.2746, -0.1862, -0.0767, 0.1663, 0.3865]),
-    11: (2.2047, 0.7916, [-0.3476, -0.2204, 0.0079, 0.1507, 0.3986]),
-    12: (2.1537, 0.8064, [-0.304, -0.1639, -0.0433, 0.1044, 0.4118]),
-    13: (2.9060, 0.7561, [-0.3547, -0.2222, -0.011, 0.2032, 0.3895]),
-    14: (3.1513, 0.7489, [-0.3415, -0.2703, 0.0078, 0.2152, 0.3848]),
-    15: (3.9809, 0.6923, [-0.3634, -0.1522, 0.0126, 0.153, 0.3594]),
-    16: (4.3532, 0.6668, [-0.374, -0.0972, 0.0489, 0.1048, 0.3167]),
-    17: (3.8555, 0.7141, [-0.4256, -0.1041, 0.0478, 0.1196, 0.363]),
-    18: (4.2369, 0.6870, [-0.4588, -0.1465, 0.054, 0.2074, 0.3466]),
-    19: (4.3496, 0.6817, [-0.4763, -0.1197, 0.1218, 0.1636, 0.3052]),
-    20: (4.0185, 0.7144, [-0.4234, -0.1029, 0.1018, 0.142, 0.261]),
-    21: (4.0973, 0.7067, [-0.4056, -0.096, 0.0707, 0.1759, 0.2373]),
-    22: (4.2718, 0.6861, [-0.4254, -0.0927, 0.0706, 0.1924, 0.2394]),
-    23: (3.3128, 0.7622, [-0.5261, -0.1166, 0.0988, 0.2405, 0.2786]),
-    24: (2.7899, 0.8007, [-0.5606, -0.148, 0.0742, 0.2185, 0.4094]),
+    2: (0.5241, 0.9334, [-0.1685, -0.0811, -0.0138, 0.0703, 0.1969]),
+    3: (0.0099, 0.9529, [-0.5636, -0.0899, 0.1281, 0.1598, 0.3406]),
+    4: (0.6078, 0.8958, [-0.3405, -0.0950, -0.0273, 0.1928, 0.2905]),
+    5: (-0.0307, 0.9853, [-0.2554, -0.0720, -0.0128, 0.1164, 0.2318]),
+    6: (0.4415, 0.9516, [-0.2695, -0.1791, 0.0055, 0.1948, 0.2512]),
+    7: (1.1086, 0.8879, [-0.3402, -0.1555, 0.0436, 0.1568, 0.2847]),
+    8: (1.4733, 0.8524, [-0.3942, -0.1328, 0.0719, 0.1651, 0.2729]),
+    9: (1.8201, 0.8210, [-0.2684, -0.2142, -0.0197, 0.1957, 0.3049]),
+    10: (1.6500, 0.8356, [-0.2629, -0.1919, -0.0874, 0.1714, 0.3899]),
+    11: (2.1378, 0.7977, [-0.3492, -0.2225, 0.0123, 0.1507, 0.3965]),
+    12: (2.1351, 0.8081, [-0.3049, -0.1638, -0.0441, 0.1074, 0.4113]),
+    13: (2.7235, 0.7729, [-0.3481, -0.2193, -0.0347, 0.2327, 0.3837]),
+    14: (2.9452, 0.7679, [-0.3341, -0.2671, -0.0189, 0.2486, 0.3783]),
+    15: (3.5900, 0.7282, [-0.3580, -0.1852, -0.0039, 0.1903, 0.3653]),
+    16: (3.8789, 0.7104, [-0.3705, -0.1574, 0.0582, 0.1288, 0.3239]),
+    17: (3.5357, 0.7435, [-0.4232, -0.1447, 0.0473, 0.1459, 0.3678]),
+    18: (3.8287, 0.7245, [-0.4558, -0.1533, 0.0198, 0.2675, 0.3379]),
+    19: (3.9239, 0.7208, [-0.4731, -0.1738, 0.1174, 0.2041, 0.3116]),
+    20: (3.6996, 0.7437, [-0.4190, -0.1451, 0.1125, 0.1654, 0.2560]),
+    21: (3.7532, 0.7383, [-0.4213, -0.1122, 0.1107, 0.1663, 0.2265]),
+    22: (3.8604, 0.7239, [-0.4450, -0.1109, 0.1236, 0.1827, 0.2198]),
+    23: (3.1501, 0.7772, [-0.5290, -0.1308, 0.1197, 0.2271, 0.2805]),
+    24: (2.7527, 0.8041, [-0.5601, -0.1529, 0.0790, 0.2155, 0.4098]),
 }
 
 
@@ -370,17 +383,39 @@ def _fit_full(curves):
 
 
 def _fit_subset(curves):
-    """Per-hour console-only fits: {hour: (a, b, res)}."""
+    """Per-hour console-only fits: {hour: (a, b, res)}.
+
+    Each hour's slope is shrunk SHRINK_SUB toward the pooled slope
+    fitted over all hours at once, which regularises the small
+    console-only sample; the intercept is refit through the hour's
+    mean point and the residuals recomputed from the shrunk line.
+    """
     use = [c for c in curves if c["console"]]
     fits = {}
     if len(use) < MIN_SUB_CURVES:
         return fits
+    pooled = None
+    rows_all = [(math.log(c["p1"]), math.log(c["day"][h]))
+                for c in use for h in range(2, 25)
+                if h in c["day"] and c["day"][h] > 0]
+    pooled_fit = _ols1(rows_all)
+    if pooled_fit is not None:
+        pooled = pooled_fit[1]
     for h in range(2, 25):
         rows = [(math.log(c["p1"]), math.log(c["day"][h]))
                 for c in use if h in c["day"] and c["day"][h] > 0]
         fit = _ols1(rows)
-        if fit is not None:
-            fits[h] = fit
+        if fit is None:
+            continue
+        a, b, res = fit
+        if pooled is not None and SHRINK_SUB > 0.0:
+            n = len(rows)
+            mx = sum(r[0] for r in rows) / n
+            my = sum(r[1] for r in rows) / n
+            b = (1.0 - SHRINK_SUB) * b + SHRINK_SUB * pooled
+            a = my - b * mx
+            res = sorted(r[1] - (a + b * r[0]) for r in rows)
+        fits[h] = (a, b, res)
     return fits
 
 
@@ -538,6 +573,7 @@ def _forecast_case_inner(case):
     full_fits = _fit_full(curves)
     sub_fits = _fit_subset(curves)
     knn_scales = _knn_scales(curves)
+    med_idx = min(range(len(levels)), key=lambda i: abs(levels[i] - 0.5))
     rows = []
     for h in hours:
         full_lq = None
@@ -572,6 +608,8 @@ def _forecast_case_inner(case):
             spread = SIGMA * math.sqrt(h - 1)
             log_q = [math.log(max(1.0, p1)) + NORMAL.inv_cdf(tau) * spread
                      for tau in levels]
+        med = log_q[med_idx]
+        log_q = [med + (v - med) * SPREAD_SCALE for v in log_q]
         rows.append({"hour": h, "q": _clean([_exp_capped(v) for v in log_q])})
     return {"hours": rows}
 
